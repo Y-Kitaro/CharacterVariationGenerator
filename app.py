@@ -1,27 +1,16 @@
 import gradio as gr
-from modules.pose_generator import PoseGenerator
 from modules.upscaler import Upscaler
 from modules.mask_generator import MaskGenerator
 from modules.expression_editor import ExpressionEditor
 import os
 from PIL import Image
+import ast
+import time
 
 # Initialize Modules
-pose_gen = PoseGenerator()
 upscaler = Upscaler()
 mask_gen = MaskGenerator()
 expr_editor = ExpressionEditor()
-
-def generate_poses(image, base_prompt, pose_prompts_str):
-    if image is None:
-        return []
-    
-    pose_prompts = [p.strip() for p in pose_prompts_str.split('\n') if p.strip()]
-    if not pose_prompts:
-        return []
-        
-    results = pose_gen.generate_variations(image, base_prompt, pose_prompts)
-    return results
 
 def upscale_image(image, scale_factor):
     if image is None:
@@ -36,9 +25,7 @@ def upscale_image(image, scale_factor):
     result = upscaler.upscale(image, scale)
     return result
 
-import ast
-
-def detect_face_mask(image, points_str):
+def detect_face_mask(image, points_str, mask_adjustment):
     if image is None:
         return None
     
@@ -51,20 +38,19 @@ def detect_face_mask(image, points_str):
         except:
             print("Failed to parse points string, using default.")
     
-    # If points is empty list, treat as None to trigger fallback in mask_gen? 
-    # Or mask_gen should handle empty list? 
-    # Current mask_gen: if points is None: default. 
     if not points: 
         points = None
         
-    mask = mask_gen.generate_mask(image, points=points)
+    mask = mask_gen.generate_mask(image, points=points, dilation_factor=mask_adjustment)
     return mask
 
-import time
-
-def generate_expressions(image, mask, base_prompt, expression_data, strength, guidance, steps, file_prefix):
+def generate_expressions(image, mask, base_prompt, expression_data, strength, guidance, steps, file_prefix, model_path):
     if image is None or mask is None:
         return []
+
+    # Ensure the correct model is loaded
+    if model_path:
+        expr_editor.load_model(model_path)
         
     # expression_data is a list of lists or pandas df. Gradio passes list of lists by default for 'array' type? 
     # Let's check type or assume list of lists if type='array'
@@ -125,64 +111,45 @@ def generate_expressions(image, mask, base_prompt, expression_data, strength, gu
     return results
 
 # Gradio Interface
-with gr.Blocks(title="Character Variation Generator", theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# Character Variation Generator")
+with gr.Blocks(title="Character Variation Generator v1.0", theme=gr.themes.Soft()) as demo:
+    gr.Markdown("# Character Variation Generator v1.0")
+    gr.Markdown("Upload an image, optionally upscale it, and then generate expression variations.")
     
     with gr.Tabs():
-        # --- Step 1: Pose Generation ---
-        with gr.Tab("Step 1: Pose Generation"):
+        # --- Step 1: Image Upload & Upscale ---
+        with gr.Tab("Step 1: Image Upload & Upscale"):
             with gr.Row():
                 with gr.Column():
-                    ref_image = gr.Image(label="Reference Image", type="pil", height=400)
-                    base_prompt_input = gr.Textbox(label="Base Prompt (Character Features)", placeholder="e.g. anime girl, blue hair, white dress")
-                    pose_prompts_input = gr.Textbox(label="Pose Prompts (One per line)", placeholder="standing\nsitting\nrunning", lines=5)
-                    generate_pose_btn = gr.Button("Generate Poses", variant="primary")
-                
-                with gr.Column():
-                    pose_gallery = gr.Gallery(label="Generated Poses", show_label=True, columns=2, height=600, allow_preview=True)
-            
-            generate_pose_btn.click(
-                fn=generate_poses,
-                inputs=[ref_image, base_prompt_input, pose_prompts_input],
-                outputs=[pose_gallery]
-            )
-
-        # --- Step 2: Upscaling ---
-        with gr.Tab("Step 2: Upscaling"):
-            gr.Markdown("Select an image generated in Step 1 or upload a new one to upscale.")
-            with gr.Row():
-                with gr.Column():
-                    # We can allow user to drag from Step 1 gallery manually or just upload
                     input_image_upscale = gr.Image(label="Input Image", type="pil", height=400)
                     scale_slider = gr.Slider(minimum=2, maximum=4, value=2, step=1, label="Upscale Factor (Generic Resize if not x4)")
                     upscale_btn = gr.Button("Upscale", variant="primary")
                 
                 with gr.Column():
-                    upscaled_image_output = gr.Image(label="Upscaled Image", type="pil", interactive=False)
+                    upscaled_image_output = gr.Image(label="Upscaled / Processed Image", type="pil", interactive=False)
             
-            # Helper to transfer selected image from Step 1 gallery to Step 2 input
-            def on_select_pose(evt: gr.SelectData, gallery_data):
-                pass 
-
             upscale_btn.click(
                 fn=upscale_image,
                 inputs=[input_image_upscale, scale_slider],
                 outputs=[upscaled_image_output]
             )
 
-        # --- Step 3: Expression Variation ---
-        with gr.Tab("Step 3: Expression Variation"):
-            gr.Markdown("Use the upscaled image to generate expression variations.")
+        # --- Step 2: Expression Variation ---
+        with gr.Tab("Step 2: Expression Variation"):
+            gr.Markdown("Use the upscaled image from Step 1 (or upload new) to generate expression variations.")
             
             with gr.Row():
                 # Column 1: Input & Masking
                 with gr.Column(scale=1):
-                    input_image_expr = gr.Image(label="Input Image (Upscaled) - Click to Select Mask Point", type="pil", height=500)
+                    # Link Step 1 Output to Step 2 Input? 
+                    # For now user can drag and drop or we can add a button to transfer.
+                    # Or just use the same image component technically? Separation is cleaner.
+                    input_image_expr = gr.Image(label="Input Image - Click to Select Mask Point", type="pil", height=500)
                     
                     gr.Markdown("### Mask Settings")
                     gr.Markdown("Click on the face to set SAM point.")
                     points_state = gr.State([])
                     points_text = gr.Textbox(label="Selected Points (x, y)", interactive=True, placeholder="[]")
+                    mask_adj_slider = gr.Slider(minimum=-20, maximum=20, value=0, step=1, label="Mask Adjustment (Dilate/Erode)")
                     
                     with gr.Row():
                         detect_mask_btn = gr.Button("Generate Mask", variant="secondary")
@@ -207,6 +174,38 @@ with gr.Blocks(title="Character Variation Generator", theme=gr.themes.Soft()) as
                     )
                     
                     with gr.Accordion("Advanced Settings", open=True):
+                        # Model Selection
+                        model_dirs = expr_editor.config["models"]["expression_editor"].get("model_directories", ["assets/models/sdxl"])
+                        # Configure default model path
+                        default_model_path = expr_editor.config["models"]["expression_editor"]["checkpoint_path"]
+                        
+                        from modules.utils import list_models
+                        
+                        def get_model_list():
+                            models = list_models(model_dirs)
+                            # Ensure default is in list if exists
+                            if default_model_path and os.path.exists(default_model_path) and default_model_path not in models:
+                                models.insert(0, default_model_path)
+                            return models
+
+                        current_models = get_model_list()
+                        
+                        with gr.Row():
+                            model_selector = gr.Dropdown(
+                                label="Expression Model", 
+                                choices=current_models, 
+                                value=default_model_path if default_model_path in current_models else (current_models[0] if current_models else None),
+                                interactive=True,
+                                scale=3
+                            )
+                            refresh_models_btn = gr.Button("🔄", variant="secondary", scale=0, size="sm")
+
+                        def refresh_models_list():
+                             new_models = get_model_list()
+                             return gr.update(choices=new_models)
+
+                        refresh_models_btn.click(fn=refresh_models_list, outputs=[model_selector])
+
                         strength_slider = gr.Slider(minimum=0.1, maximum=1.0, value=0.55, step=0.01, label="Denoising Strength")
                         guidance_slider = gr.Slider(minimum=1.0, maximum=20.0, value=7.5, step=0.5, label="Guidance Scale")
                         steps_slider = gr.Slider(minimum=10, maximum=100, value=25, step=1, label="Inference Steps")
@@ -240,7 +239,7 @@ with gr.Blocks(title="Character Variation Generator", theme=gr.themes.Soft()) as
 
             detect_mask_btn.click(
                 fn=detect_face_mask,
-                inputs=[input_image_expr, points_text],
+                inputs=[input_image_expr, points_text, mask_adj_slider],
                 outputs=[mask_image_output]
             )
             
@@ -254,7 +253,8 @@ with gr.Blocks(title="Character Variation Generator", theme=gr.themes.Soft()) as
                     strength_slider,
                     guidance_slider,
                     steps_slider,
-                    file_prefix_input
+                    file_prefix_input,
+                    model_selector
                 ],
                 outputs=[expression_gallery]
             )

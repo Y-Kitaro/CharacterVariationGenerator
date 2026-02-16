@@ -1,26 +1,16 @@
 # Model Paths Configuration
 
 models:
-  pose_generator:
-    # Directory to store/load Qwen Image Edit model
-    model_path: "assets/models/qwen_image_edit" 
-    # Fallback/Download HF ID if local empty
-    hf_model_id: "Qwen/Qwen-Image-Edit-2511" 
-  
   upscaler:
     model_name: "RealESRGAN_x4plus_anime_6B"
     model_path: "assets/models/RealESRGAN_x4plus_anime_6B.pth"
 
   mask_generator:
-    # Ultralytics SAM model name (will auto-download to appropriate dir or us this path)
-    model_name: "sam3.pt" # or sam2.pt / sam2_b.pt depending on release
-    # For SAM3, if it's not yet in standard ultralytics pip, we might use a specific path or "sam2" as proxy.
-    # Assuming "sam2.pt" is the closest valid alias for now if "sam3" isn't strictly out in pip.
-    # User said "SAM3" but "Meta recently released". It's likely referencing SAM2.1 or SAM3 alpha.
-    # We will use "sam2.pt" or "sam2_l.pt" as the robust default in Ultralytics.
-
+    model_name: "assets/models/sam3.pt"
   expression_editor:
     checkpoint_path: "assets/models/animagine-xl-3.1.safetensors" 
+    model_directories:
+      - "assets/models/sdxl"
 
 device: "cuda"
 
