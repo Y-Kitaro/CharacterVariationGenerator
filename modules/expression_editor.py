@@ -19,7 +19,6 @@ class ExpressionEditor:
         target_path = checkpoint_path if checkpoint_path else self.checkpoint_path
         
         # Check if we are already loaded with the correct model
-        # We need to store current loaded path to know if switch is needed
         if hasattr(self, 'current_loaded_path') and self.current_loaded_path == target_path and self.pipeline is not None:
             return
 
@@ -37,20 +36,32 @@ class ExpressionEditor:
                  torch_dtype=torch.float16,
                  variant="fp16",
                  use_safetensors=True
-             )
+             ).to(self.device)
         else:
             print(f"Loading SDXL Inpainting model from {target_path}...")
             self.pipeline = StableDiffusionXLInpaintPipeline.from_single_file(
                 target_path,
                 torch_dtype=torch.float16,
-                variant="fp16",
                 use_safetensors=True
-            )
+            ).to(self.device)
         
-        self.pipeline.to(self.device)
-        # Enable memory optimizations
-        self.pipeline.enable_model_cpu_offload() 
         self.current_loaded_path = target_path
+        
+        # Initialize Compel for Long Prompt weighting
+        try:
+            from compel import Compel, ReturnedEmbeddingsType
+            print("Initializing Compel for SDXL Long Prompts...")
+            self.compel = Compel(
+                tokenizer=[self.pipeline.tokenizer, self.pipeline.tokenizer_2],
+                text_encoder=[self.pipeline.text_encoder, self.pipeline.text_encoder_2],
+                returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
+                requires_pooled=[False, True],
+                truncate_long_prompts=False
+            )
+        except ImportError:
+            print("Warning: Compel library not found. Long prompts/weighting might not work as expected.")
+            self.compel = None
+            
         print(f"ExpressionEditor model loaded: {target_path}")
 
     def unload_model(self):
@@ -59,105 +70,186 @@ class ExpressionEditor:
             self.pipeline = None
             torch.cuda.empty_cache()
 
-    def edit_expression(self, image: Image.Image, mask: Image.Image, prompt: str, base_prompt: str = "", strength: float = 0.55, guidance_scale: float = 7.5, num_inference_steps: int = 25) -> Image.Image:
+    def get_pipeline_embeds(self, prompt, negative_prompt, device):
+        """
+        Helper to get long prompt embeds for SDXL (WebUI style chunking).
+        """
+        import math
+        
+        tokenizers = [self.pipeline.tokenizer, self.pipeline.tokenizer_2]
+        text_encoders = [self.pipeline.text_encoder, self.pipeline.text_encoder_2]
+        
+        # 1. Tokenize (raw, no special tokens)
+        p_ids = [t.encode(prompt, add_special_tokens=False) for t in tokenizers]
+        n_ids = [t.encode(negative_prompt, add_special_tokens=False) for t in tokenizers]
+        
+        # 2. Determine max chunks (75 tokens per chunk allows +2 for BOS/EOS)
+        max_len = 0
+        for ids in p_ids + n_ids:
+            max_len = max(max_len, len(ids))
+        
+        total_chunks = math.ceil(max_len / 75) if max_len > 0 else 1
+        
+        prompt_embeds_parts = []
+        neg_embeds_parts = []
+        pooled_prompt_embeds = None
+        neg_pooled_prompt_embeds = None
+        
+        for k, (tokenizer, text_encoder) in enumerate(zip(tokenizers, text_encoders)):
+            pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+            eos_id = tokenizer.eos_token_id
+            bos_id = tokenizer.bos_token_id
+            
+            def build_chunks(tokens):
+                chunks = []
+                for i in range(total_chunks):
+                    start = i * 75
+                    end = start + 75
+                    chunk_tokens = tokens[start:end]
+                    
+                    # Add specialized tokens: [BOS] + tokens + [EOS]
+                    built = [bos_id] + chunk_tokens + [eos_id]
+                    
+                    # Pad to 77
+                    if len(built) < 77:
+                        built += [pad_id] * (77 - len(built))
+                    
+                    # Truncate if strictly > 77 (safety)
+                    built = built[:77]
+                    
+                    chunks.append(torch.tensor(built, dtype=torch.long, device=device))
+                return torch.stack(chunks)
+            
+            batch_p = build_chunks(p_ids[k])
+            batch_n = build_chunks(n_ids[k])
+            
+            with torch.no_grad():
+                out_p = text_encoder(batch_p, output_hidden_states=True)
+                out_n = text_encoder(batch_n, output_hidden_states=True)
+                
+                # Hidden states (penultimate)
+                # SDXL generally uses hidden_states[-2]
+                hidden_p = out_p.hidden_states[-2]
+                hidden_n = out_n.hidden_states[-2]
+                
+                # Flatten chunks into sequence: (chunks, 77, dim) -> (1, chunks*77, dim)
+                prompt_embeds_parts.append(hidden_p.view(1, -1, hidden_p.shape[-1]))
+                neg_embeds_parts.append(hidden_n.view(1, -1, hidden_n.shape[-1]))
+                
+                # Pooled (only from Encoder 2)
+                # Use pooled embedding from the FIRST chunk
+                # CLIPTextModelWithProjection has text_embeds
+                if k == 1 and pooled_prompt_embeds is None:
+                    pooled_prompt_embeds = out_p.text_embeds[0].unsqueeze(0)
+                    neg_pooled_prompt_embeds = out_n.text_embeds[0].unsqueeze(0)
+
+        # Concat embeddings from both encoders along feature dim
+        prompt_embeds = torch.cat(prompt_embeds_parts, dim=-1)
+        neg_embeds = torch.cat(neg_embeds_parts, dim=-1)
+        
+        return prompt_embeds, neg_embeds, pooled_prompt_embeds, neg_pooled_prompt_embeds
+
+    def edit_expression(self, image: Image.Image, mask: Image.Image, prompt: str, negative_prompt: str = "", strength: float = 0.55, guidance_scale: float = 7.5, num_inference_steps: int = 20, guide_size: int = 1024, feather: int = 5) -> Image.Image:
+        from PIL import ImageFilter
+        import cv2
+        import numpy as np
+
         self.load_model()
         
-        full_prompt = f"{base_prompt}, {prompt}, high quality, detailed"
-        negative_prompt = "low quality, bad anatomy, bad hands, text, error"
+        print(f"Editing expression with prompt: {prompt[:50]}..., strength: {strength}")
         
-        print(f"Editing expression with prompt: {full_prompt}, strength: {strength}")
+        # Encode Long Prompts (Custom SDXL Logic)
+        (
+             prompt_embeds,
+             neg_embeds,
+             pooled_embeds,
+             neg_pooled_embeds
+        ) = self.get_pipeline_embeds(prompt, negative_prompt, self.device)
         
-        # Ensure image and mask are same size
-        if image.size != mask.size:
-            mask = mask.resize(image.size)
+        # Ensure image is RGB
+        if image.mode != "RGB":
+            image = image.convert("RGB")
             
+        # Ensure mask is L mode and same size
+        if mask.mode != "L":
+            mask = mask.convert("L")
+        if mask.size != image.size:
+            mask = mask.resize(image.size, Image.NEAREST)
+            
+        final_image = image.copy()
         original_width, original_height = image.size
         
-        # --- High-Res Face Inpainting Strategy ---
-        # 1. Calculate Bounding Box of the mask
-        mask_arr = np.array(mask)
-        # Find indices where mask > 0
-        coords = np.argwhere(mask_arr > 0)
+        # Find Connected Components in the mask (to handle multiple faces or isolated regions)
+        mask_np = np.array(mask)
+        # Binarize just in case
+        _, thresh = cv2.threshold(mask_np, 127, 255, cv2.THRESH_BINARY)
         
-        if coords.size == 0:
-            print("Warning: Empty mask provided. using full image.")
-            # Fallback to previous logic if mask empty (though unlikely)
-            bbox = (0, 0, original_width, original_height)
-        else:
-            # coords is (y, x)
-            y0, x0 = coords.min(axis=0)
-            y1, x1 = coords.max(axis=0) + 1 # +1 for exclusive
-            
-            # 2. Add Padding / Context
-            # We want a square crop for SDXL usually, or at least some context
-            h = y1 - y0
-            w = x1 - x0
-            
-            # Center
-            cy = y0 + h // 2
-            cx = x0 + w // 2
-            
-            # Determine size: max dimension * factor (e.g. 1.5x)
-            size = int(max(h, w) * 1.5)
-            # Ensure divisible by 8 (cleaning)
-            
-            # Define new bounds
-            x_min = max(0, cx - size // 2)
-            y_min = max(0, cy - size // 2)
-            x_max = min(original_width, cx + size // 2)
-            y_max = min(original_height, cy + size // 2)
-            
-            # Adjust to be square if possible? SDXL handles non-square but square is safe.
-            # Let's just crop to this region
-            bbox = (x_min, y_min, x_max, y_max)
-            
-        print(f"Cropping to bbox: {bbox}")
+        # Dilation to merge fragmented components (e.g. eyes, mouth detected separately)
+        # Use large kernel to bridge gaps within a face
+        kernel = np.ones((20, 20), np.uint8)
+        dilated_mask = cv2.dilate(thresh, kernel, iterations=3)
         
-        cropped_image = image.crop(bbox)
-        cropped_mask = mask.crop(bbox)
+        # Find components on DILATED mask
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(dilated_mask, connectivity=8)
         
-        # 3. Resize to SDXL native resolution (1024x1024)
-        target_size = (1024, 1024)
-        input_image_resized = cropped_image.resize(target_size, Image.LANCZOS)
-        input_mask_resized = cropped_mask.resize(target_size, Image.NEAREST)
+        print(f"Mask analysis: Found {num_labels - 1} face regions.")
         
         generator = torch.Generator(device=self.device).manual_seed(42)
-        
-        # 4. Inpaint High Res
-        output_crop = self.pipeline(
-            prompt=full_prompt,
-            negative_prompt=negative_prompt,
-            image=input_image_resized,
-            mask_image=input_mask_resized,
-            strength=strength,
-            guidance_scale=guidance_scale,
-            num_inference_steps=num_inference_steps,
-            width=1024,
-            height=1024,
-            generator=generator
-        ).images[0]
-        
-        # 5. Composite back
-        # Resize output back to crop size
-        crop_w = bbox[2] - bbox[0]
-        crop_h = bbox[3] - bbox[1]
-        output_crop_resized = output_crop.resize((crop_w, crop_h), Image.LANCZOS)
-        
-        # Create final image
-        final_image = image.copy()
-        
-        # Optimally we should blend the edges, but simple paste might work if mask is good.
-        # Let's paste using the mask as alpha to blend only the changed area?
-        # But inpainting changes the whole masked area. 
-        # Actually, self.pipeline returns the whole image (in this case 1024x1024).
-        # We paste it into the original location.
-        
-        final_image.paste(output_crop_resized, (bbox[0], bbox[1]))
-        
-        # Optional: Blend using the mask to allow "seamless" borders if the generation drifted color?
-        # Typically Inpainting pipeline preserves unmasked area perfectly, so direct paste is fine
-        # UNLESS strength < 1.0 where unmasked areas might shift? 
-        # Diffusers Inpaint pipeline preserves unmasked pixels by default behavior (blending latents).
-        # So explicit paste is correct.
-        
+
+        for i in range(1, num_labels):
+            x, y, w, h = stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP], stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+            
+            # Margin strategy from sam_test.py
+            margin = 32
+            x_min = max(0, x - margin)
+            y_min = max(0, y - margin)
+            x_max = min(original_width, x + w + margin)
+            y_max = min(original_height, y + h + margin)
+            
+            bbox = (x_min, y_min, x_max, y_max)
+            print(f"Processing Face Region {i}: BBox {bbox}")
+            
+            # Crop Original Image
+            cropped_img = image.crop(bbox)
+            
+            # Create mask for this specific component
+            cropped_mask = mask.crop(bbox)
+            
+            target_size = (guide_size, guide_size)
+            img_resized = cropped_img.resize(target_size, Image.LANCZOS)
+            mask_resized = cropped_mask.resize(target_size, Image.LANCZOS)
+
+            # Inpaint
+            output_resized = self.pipeline(
+                prompt_embeds=prompt_embeds,
+                negative_prompt_embeds=neg_embeds,
+                pooled_prompt_embeds=pooled_embeds,
+                negative_pooled_prompt_embeds=neg_pooled_embeds,
+                image=img_resized,
+                mask_image=mask_resized,
+                strength=strength, 
+                guidance_scale=guidance_scale,
+                num_inference_steps=num_inference_steps,
+                width=guide_size,
+                height=guide_size,
+                generator=generator
+            ).images[0]
+            
+            # Resize back
+            output_crop = output_resized.resize(cropped_img.size, Image.LANCZOS)
+            
+            # Feathering composite
+            # Create a soft mask from the cropped mask
+            # We used binary mask for crop, but let's re-crop the original mask for feathering
+            
+            # Apply feather to the mask used for compositing
+            # We can use the resized mask or the original cropped mask
+            # Better to use the original resolution mask for final composite
+            mask_for_paste = mask.crop(bbox)
+            if feather > 0:
+                 mask_for_paste = mask_for_paste.filter(ImageFilter.GaussianBlur(feather))
+            
+            final_image.paste(output_crop, (x_min, y_min), mask=mask_for_paste)
+            
+        print("Expression editing complete.")
         return final_image

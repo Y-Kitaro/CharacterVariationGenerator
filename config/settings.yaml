@@ -1,19 +1,16 @@
 # Model Paths Configuration
 
 models:
-  upscaler:
-    model_name: "RealESRGAN_x4plus_anime_6B"
-    model_path: "assets/models/RealESRGAN_x4plus_anime_6B.pth"
-
   mask_generator:
-    model_name: "assets/models/sam3.pt"
+    segmentation_model_path: "assets/models/sam3.pt"
   expression_editor:
-    checkpoint_path: "assets/models/animagine-xl-3.1.safetensors" 
-    model_directories:
-      - "assets/models/sdxl"
+    checkpoint_path: "assets/models/sdxl/dummy.safetensors" 
 
 device: "cuda"
 
 processing:
   upscale_factor: 2
-  default_denoising_strength: 0.55
+  default_denoising_strength: 0.50
+
+face_detailer:
+  guide_size: 1024
