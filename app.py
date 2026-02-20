@@ -5,6 +5,7 @@ from modules.utils import resolve_model_path, list_models
 import os
 import json
 import time
+import pandas as pd
 from PIL import Image
 
 # Initialize Modules
@@ -14,122 +15,345 @@ expr_editor = ExpressionEditor()
 # Settings File Path
 SETTINGS_FILE = "config/last_settings.json"
 
+# --- Model Loading Helpers ---
+model_map = {}
+
+def get_available_models():
+    """
+    Scans directories defined in settings.yaml and the default checkpoint path.
+    Populates global model_map.
+    Returns:
+        list of filenames.
+    """
+    global model_map
+    # Correctly navigate configuration structure: models -> expression_editor
+    models_config = expr_editor.config.get("models", {})
+    settings_config = models_config.get("expression_editor", {})
+    
+    # 1. Scanned Directories (Primary Source)
+    scan_dirs = settings_config.get("model_directories", [])
+    if isinstance(scan_dirs, str):
+        scan_dirs = [scan_dirs]
+        
+    print(f"Model directories from config: {scan_dirs}")
+    scanned_models = list_models(scan_dirs, extensions=[".safetensors", ".ckpt"])
+    
+    # 2. Legacy Checkpoint Path (Optional)
+    default_ckpt = settings_config.get("checkpoint_path", "")
+    model_paths = []
+    if default_ckpt and os.path.exists(default_ckpt):
+        model_paths.append(default_ckpt)
+    
+    # Merge and Deduplicate
+    all_paths = list(set(scanned_models + model_paths))
+    
+    # Build Map
+    new_map = {}
+    for p in all_paths:
+        filename = os.path.basename(p)
+        new_map[filename] = p
+    
+    model_map = new_map
+    choices = list(model_map.keys())
+    choices.sort()
+    return choices
+
+def load_selected_model(model_name):
+    global model_map
+    if not model_name or model_name not in model_map:
+        return f"Model not found: {model_name}"
+    
+    path = model_map[model_name]
+    try:
+        expr_editor.load_model(checkpoint_path=path)
+        return f"Loaded: {model_name}"
+    except Exception as e:
+        return f"Error loading model: {e}"
+
+# --- Settings Persistence ---
+# --- Settings Persistence ---
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
         try:
-            with open(SETTINGS_FILE, "r") as f:
-                return json.load(f)
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                
+            # Cleanup string values to remove extra escapes/literal newlines
+            cleaned_data = {}
+            for k, v in data.items():
+                if isinstance(v, str):
+                    # Fix literal "\n" strings that should be real newlines
+                    v = v.replace("\\n", "\n")
+                    # Fix literal "\r"
+                    v = v.replace("\\r", "\r")
+                cleaned_data[k] = v
+            return cleaned_data
+            
         except Exception as e:
             print(f"Error loading settings: {e}")
     return {}
 
 def save_settings(settings):
     try:
-        with open(SETTINGS_FILE, "w") as f:
-            json.dump(settings, f, indent=4)
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=4, ensure_ascii=False)
     except Exception as e:
         print(f"Error saving settings: {e}")
 
-# Load initial settings to populate defaults
+# Initial Load
 saved = load_settings()
-DEFAULT_SAM_PROMPT = saved.get("sam_prompt", "face")
-DEFAULT_PROMPT = saved.get("prompt", "smile, high quality")
-DEFAULT_NEG_PROMPT = saved.get("negative_prompt", "lowres, bad anatomy, bad hands, cropped, worst quality")
-DEFAULT_STRENGTH = saved.get("strength", 0.50)
-DEFAULT_GUIDANCE = saved.get("guidance", 5.0)
+DEFAULT_SAM = saved.get("sam_prompt", "face")
+DEFAULT_ADJ = saved.get("mask_adjustment", 0)
+DEFAULT_BASE_POS = saved.get("base_positive_prompt", "high quality, detailed")
+DEFAULT_BASE_NEG = saved.get("base_negative_prompt", "lowres, bad anatomy, bad hands, cropped, worst quality")
+DEFAULT_PREFIX = saved.get("file_prefix", "variation_")
+DEFAULT_STRENGTH = saved.get("strength", 0.55)
+DEFAULT_GUIDANCE = saved.get("guidance", 7.5)
 DEFAULT_STEPS = saved.get("steps", 20)
-DEFAULT_MASK_ADJ = saved.get("mask_adjustment", 0)
 
-# Get guide_size from config/settings.yaml (via module config)
-# We access the loaded config from one of the modules
-DEFAULT_GUIDE_SIZE = expr_editor.config.get("face_detailer", {}).get("guide_size", 1024)
+# Batch Table Defaults
+# Expression Prompt, Filename Suffix
+DEFAULT_BATCH_DATA = [
+    ["smile", "smile"],
+    ["angry", "angry"],
+    ["sad", "sad"],
+    ["surprised", "surprised"]
+]
 
-def run_process(input_image, sam_prompt, inpaint_prompt, negative_prompt, strength, guidance, steps, mask_adj):
-    if input_image is None:
-        return None, None
+# --- Processing Logic ---
+
+# Global Mask Cache
+current_mask = None
+current_input_image = None
+current_mask_image_display = None
+
+def run_mask_generation(img, sam_prompt, adj):
+    global current_mask, current_input_image, current_mask_image_display
+    if img is None:
+        return None
     
-    # Save current settings
+    print(f"Generating mask for '{sam_prompt}' with adj {adj}...")
+    mask = mask_gen.generate_mask(img, prompt_text=sam_prompt, dilation_factor=adj)
+    
+    current_input_image = img
+    current_mask = mask # PIL Image (L mode)
+    current_mask_image_display = mask
+    
+    return mask
+
+def run_batch_generation(
+    input_img, 
+    model_name,
+    base_pos, 
+    base_neg, 
+    batch_df, 
+    prefix, 
+    strength, 
+    guidance, 
+    steps
+):
+    global current_mask, model_map
+    
+    if input_img is None:
+        return [], "No input image."
+        
+    # Ensure Model is Loaded
+    if not model_name:
+        return [], "Error: No model selected."
+        
+    if model_name not in model_map:
+        return [], f"Error: Model '{model_name}' not found in map. Please refresh."
+        
+    target_path = model_map[model_name]
+    
+    # Check if we need to load/switch model
+    # Accessing internal state of expr_editor (a bit dirty but effective given current structure)
+    try:
+        # If pipeline not loaded OR current loaded path (if exists) different
+        if expr_editor.pipeline is None or \
+           not hasattr(expr_editor, 'current_loaded_path') or \
+           expr_editor.current_loaded_path != target_path:
+               
+            print(f"Loading/Switching model to: {model_name}")
+            expr_editor.load_model(target_path)
+    except Exception as e:
+        return [], f"Error loading model: {e}"
+
+    if current_mask is None:
+        # Generate default mask if not yet generated manually
+        print("Mask not found, generating default 'face' mask...")
+        current_mask = run_mask_generation(input_img, "face", 0)
+    
+    # Check output directory
+    output_dir = "outputs"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    results = []
+    
+    # Iterate DataFrame
+    if isinstance(batch_df, pd.DataFrame):
+        rows = batch_df.values.tolist()
+    else:
+        rows = batch_df # list of lists
+        
+    for i, row in enumerate(rows):
+        expr_prompt = row[0]
+        suffix = row[1]
+        
+        if not expr_prompt:
+            continue
+            
+        full_pos_prompt = f"{expr_prompt}, {base_pos}" if base_pos else expr_prompt
+        
+        print(f"Batch {i+1}: {expr_prompt} (File: {suffix})")
+        
+        guide_size = expr_editor.config.get("face_detailer", {}).get("guide_size", 1024)
+        
+        try:
+            # We already ensured model is loaded via explicit call above.
+            # edit_expression (modified) will just check self.pipeline is not None.
+            res_img = expr_editor.edit_expression(
+                image=input_img,
+                mask=current_mask,
+                prompt=full_pos_prompt,
+                negative_prompt=base_neg,
+                strength=strength,
+                guidance_scale=guidance,
+                num_inference_steps=steps,
+                guide_size=guide_size
+            )
+        except Exception as e:
+            print(f"Error processing batch item {i}: {e}")
+            continue
+        
+        # Save
+        save_suffix = "".join([c for c in suffix if c.isalnum() or c in ('-', '_')])
+        if not save_suffix:
+            save_suffix = f"batch_{i}"
+            
+        filename = f"{prefix}{save_suffix}.png"
+        save_path = os.path.join(output_dir, filename)
+        
+        if os.path.exists(save_path):
+            timestamp = int(time.time())
+            filename = f"{prefix}{save_suffix}_{timestamp}.png"
+            save_path = os.path.join(output_dir, filename)
+            
+        res_img.save(save_path)
+        results.append((res_img, filename))
+        
+    # Save Settings
     current_settings = {
-        "sam_prompt": sam_prompt,
-        "prompt": inpaint_prompt,
-        "negative_prompt": negative_prompt,
+        "sam_prompt": DEFAULT_SAM, 
+        "base_positive_prompt": base_pos,
+        "base_negative_prompt": base_neg,
+        "file_prefix": prefix,
         "strength": strength,
         "guidance": guidance,
-        "steps": steps,
-        "mask_adjustment": mask_adj
+        "steps": steps
     }
     save_settings(current_settings)
-    
-    print(f"Generating mask for '{sam_prompt}'...")
-    # Generate Mask
-    mask = mask_gen.generate_mask(input_image, prompt_text=sam_prompt, dilation_factor=mask_adj)
-    
-    print("Editing expression...")
-    # Edit Expression
-    # guide_size is read from settings.yaml (loaded in expr_editor.config)
-    # We can re-read it to ensure updates in yaml are caught if we want, but usually config is static per run.
-    guide_size = expr_editor.config.get("face_detailer", {}).get("guide_size", 1024)
-    
-    result_image = expr_editor.edit_expression(
-        image=input_image,
-        mask=mask,
-        prompt=inpaint_prompt,
-        negative_prompt=negative_prompt,
-        strength=strength,
-        guidance_scale=guidance,
-        num_inference_steps=steps,
-        guide_size=guide_size
-    )
-    
-    return result_image, mask
+        
+    return results, f"Generated {len(results)} variations in {output_dir}"
 
-# Gradio UI
-with gr.Blocks(title="Character Variation Generator (SAM3 + SDXL)", theme=gr.themes.Soft()) as demo:
+
+# --- UI Construction ---
+
+# Prepare Model Choices
+avail_model_names = get_available_models()
+default_model_name = avail_model_names[0] if avail_model_names else None
+
+with gr.Blocks(title="Character Variation Generator v2", theme=gr.themes.Soft()) as demo:
     gr.Markdown("# Character Variation Generator")
-    gr.Markdown("Based on SAM3 for segmentation and SDXL (Compel) for inpainting.")
     
     with gr.Row():
-        # Column 1: Input
+        # LEFT COLUMN: Input & Mask
         with gr.Column(scale=1):
-            input_image_box = gr.Image(label="Input Image", type="pil", height=500)
+            input_image_box = gr.Image(label="Input Image", type="pil", height=400)
+            
+            with gr.Row():
+                sam_prompt_box = gr.Textbox(label="Segmentation Prompt", value=DEFAULT_SAM, scale=2)
+                mask_adj_slider = gr.Slider(minimum=-20, maximum=20, value=DEFAULT_ADJ, step=1, label="Mask Adj", scale=2)
+                gen_mask_btn = gr.Button("Generate Mask", variant="secondary", scale=1)
+            
+            mask_display = gr.Image(label="Current Mask", type="pil", interactive=False, height=200)
 
-        # Column 2: Settings
+        # MIDDLE COLUMN: Settings & Batch
         with gr.Column(scale=1):
-            with gr.Accordion("Segmentation Settings", open=True):
-                sam_prompt_box = gr.Textbox(label="SAM Prompt", value=DEFAULT_SAM_PROMPT)
-                mask_adj_slider = gr.Slider(minimum=-20, maximum=20, value=DEFAULT_MASK_ADJ, step=1, label="Mask Adjustment (Dilate/Erode)")
+            # Model Selection
+            gr.Markdown("### Model Selection")
+            model_dropdown = gr.Dropdown(
+                choices=avail_model_names,
+                value=default_model_name,
+                label="SDXL Checkpoint",
+                interactive=True
+            )
+            load_status = gr.Markdown(f"Current: {default_model_name if default_model_name else 'None'}")
             
-            # Inpainting Settings directly visible
-            prompt_box = gr.TextArea(label="Inpaint Prompt", value=DEFAULT_PROMPT, lines=8)
-            neg_prompt_box = gr.TextArea(label="Negative Prompt", value=DEFAULT_NEG_PROMPT, lines=5)
+            # Base Prompts
+            gr.Markdown("### Prompts")
+            base_pos_box = gr.TextArea(label="Base Positive Prompt", value=DEFAULT_BASE_POS, lines=3)
+            base_neg_box = gr.TextArea(label="Base Negative Prompt", value=DEFAULT_BASE_NEG, lines=3)
             
-            with gr.Group():
-                strength_slider = gr.Slider(minimum=0.0, maximum=1.0, value=DEFAULT_STRENGTH, step=0.01, label="Denoising Strength")
-                guidance_slider = gr.Slider(minimum=1.0, maximum=20.0, value=DEFAULT_GUIDANCE, step=0.5, label="Guidance Scale (CFG)")
-                steps_slider = gr.Slider(minimum=1, maximum=100, value=DEFAULT_STEPS, step=1, label="Steps")
+            # Batch Table
+            gr.Markdown("### Batch Expressions")
+            batch_table = gr.Dataframe(
+                headers=["Expression Prompt", "Filename Suffix"],
+                datatype=["str", "str"],
+                value=DEFAULT_BATCH_DATA,
+                label="Variations List",
+                interactive=True,
+                row_count=(4, "dynamic"),
+                col_count=(2, "fixed")
+            )
             
-            run_btn = gr.Button("Generate", variant="primary", size="lg")
+            # File Settings
+            prefix_box = gr.Textbox(label="File Prefix", value=DEFAULT_PREFIX)
             
-        # Column 3: Output
-        with gr.Column(scale=1):
-            output_image_box = gr.Image(label="Result", type="pil", interactive=False, height=500)
-            
-            with gr.Accordion("Generated Mask", open=False):
-                mask_image_box = gr.Image(label="Mask", type="pil", interactive=False)
+            with gr.Accordion("Advanced Parameters", open=False):
+                strength_slider = gr.Slider(minimum=0.0, maximum=1.0, value=DEFAULT_STRENGTH, label="Denoising Strength")
+                guidance_slider = gr.Slider(minimum=1.0, maximum=20.0, value=DEFAULT_GUIDANCE, label="Guidance Scale")
+                steps_slider = gr.Slider(minimum=1, maximum=100, value=DEFAULT_STEPS, label="Steps")
 
-    run_btn.click(
-        fn=run_process,
+            generate_btn = gr.Button("Generate Batch", variant="primary", size="lg")
+
+        # RIGHT COLUMN: Results
+        with gr.Column(scale=1):
+            gr.Markdown("### Results")
+            status_text = gr.Markdown("Ready")
+            gallery = gr.Gallery(label="Generated Variations", columns=2, height=600)
+
+    # Events
+    
+    # Model Change
+    model_dropdown.change(
+        fn=load_selected_model,
+        inputs=[model_dropdown],
+        outputs=[load_status]
+    )
+    
+    # Mask Generation
+    gen_mask_btn.click(
+        fn=run_mask_generation,
+        inputs=[input_image_box, sam_prompt_box, mask_adj_slider],
+        outputs=[mask_display]
+    )
+    
+    # Batch Generation
+    generate_btn.click(
+        fn=run_batch_generation,
         inputs=[
             input_image_box,
-            sam_prompt_box,
-            prompt_box,
-            neg_prompt_box,
+            model_dropdown,
+            base_pos_box,
+            base_neg_box,
+            batch_table,
+            prefix_box,
             strength_slider,
             guidance_slider,
-            steps_slider,
-            mask_adj_slider
+            steps_slider
         ],
-        outputs=[output_image_box, mask_image_box]
+        outputs=[gallery, status_text]
     )
 
 if __name__ == "__main__":

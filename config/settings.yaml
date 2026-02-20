@@ -4,7 +4,8 @@ models:
   mask_generator:
     segmentation_model_path: "assets/models/sam3.pt"
   expression_editor:
-    checkpoint_path: "assets/models/sdxl/dummy.safetensors" 
+    model_directories:
+      - "assets/models/sdxl"
 
 device: "cuda"
 

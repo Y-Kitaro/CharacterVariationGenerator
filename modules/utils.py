@@ -27,9 +27,11 @@ def list_models(directories, extensions=[".safetensors", ".ckpt"]):
             
         print(f"Scanning directory: {directory}")
         for root, _, files in os.walk(directory):
+            print(f"  Root: {root}, Files: {files}")
             for file in files:
                 if any(file.lower().endswith(ext.lower()) for ext in extensions):
                     full_path = os.path.join(root, file)
+                    print(f"  Found model: {full_path}")
                     model_files.append(full_path)
                     
     return model_files

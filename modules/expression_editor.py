@@ -10,7 +10,7 @@ class ExpressionEditor:
         with open(config_path, "r") as f:
             self.config = yaml.safe_load(f)
         
-        self.checkpoint_path = self.config["models"]["expression_editor"]["checkpoint_path"]
+        self.checkpoint_path = None
         self.device = self.config["device"]
         self.pipeline = None
         self.default_denoising = self.config["processing"].get("default_denoising_strength", 0.55)
@@ -26,17 +26,9 @@ class ExpressionEditor:
         if self.pipeline is not None:
              self.unload_model()
 
-        if not os.path.exists(target_path):
-             print(f"Warning: SDXL Checkpoint not found at {target_path}. Using standard hf model or failing.")
-             # Fallback to standard model for testing if local file missing
-             model_id = "diffusers/stable-diffusion-xl-1.0-inpainting-0.1"
-             print(f"Loading fallback model: {model_id}")
-             self.pipeline = StableDiffusionXLInpaintPipeline.from_pretrained(
-                 model_id,
-                 torch_dtype=torch.float16,
-                 variant="fp16",
-                 use_safetensors=True
-             ).to(self.device)
+        if not target_path or not os.path.exists(target_path):
+             print(f"Warning: SDXL Checkpoint not found at {target_path}.")
+             return
         else:
             print(f"Loading SDXL Inpainting model from {target_path}...")
             self.pipeline = StableDiffusionXLInpaintPipeline.from_single_file(
@@ -79,9 +71,10 @@ class ExpressionEditor:
         tokenizers = [self.pipeline.tokenizer, self.pipeline.tokenizer_2]
         text_encoders = [self.pipeline.text_encoder, self.pipeline.text_encoder_2]
         
-        # 1. Tokenize (raw, no special tokens)
-        p_ids = [t.encode(prompt, add_special_tokens=False) for t in tokenizers]
-        n_ids = [t.encode(negative_prompt, add_special_tokens=False) for t in tokenizers]
+        # 1. Tokenize (raw, no special tokens) with explicit truncation=False
+        # Use simple tokenizer call to ensure we get full list of IDs
+        p_ids = [t(prompt, add_special_tokens=False, truncation=False)["input_ids"] for t in tokenizers]
+        n_ids = [t(negative_prompt, add_special_tokens=False, truncation=False)["input_ids"] for t in tokenizers]
         
         # 2. Determine max chunks (75 tokens per chunk allows +2 for BOS/EOS)
         max_len = 0
@@ -154,7 +147,12 @@ class ExpressionEditor:
         import cv2
         import numpy as np
 
-        self.load_model()
+        if self.pipeline is None:
+             # Try default load if not loaded, but warn
+             print("Pipeline not loaded in edit_expression, attempting default load...")
+             self.load_model()
+             if self.pipeline is None:
+                 raise RuntimeError("Model failed to load.")
         
         print(f"Editing expression with prompt: {prompt[:50]}..., strength: {strength}")
         
