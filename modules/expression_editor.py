@@ -13,7 +13,7 @@ class ExpressionEditor:
         self.checkpoint_path = None
         self.device = self.config["device"]
         self.pipeline = None
-        self.default_denoising = self.config["processing"].get("default_denoising_strength", 0.55)
+        self.default_denoising = self.config["face_detailer"].get("default_denoising_strength", 0.55)
 
     def load_model(self, checkpoint_path=None):
         target_path = checkpoint_path if checkpoint_path else self.checkpoint_path

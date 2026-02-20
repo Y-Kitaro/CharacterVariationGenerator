@@ -9,9 +9,6 @@ models:
 
 device: "cuda"
 
-processing:
-  upscale_factor: 2
-  default_denoising_strength: 0.50
-
 face_detailer:
+  default_denoising_strength: 0.50
   guide_size: 1024
