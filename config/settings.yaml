@@ -1,0 +1,14 @@
+# Model Paths Configuration
+
+models:
+  mask_generator:
+    segmentation_model_path: "assets/models/sam3.pt"
+  expression_editor:
+    model_directories:
+      - "assets/models/sdxl"
+
+device: "cuda"
+
+face_detailer:
+  default_denoising_strength: 0.50
+  guide_size: 1024
