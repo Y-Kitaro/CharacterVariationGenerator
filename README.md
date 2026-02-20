@@ -1,8 +1,10 @@
 # Character Variation Generator
 
-キャラクターの立ち絵からポーズ差分・表情差分を生成するAIツールです。
+キャラクターの画像から表情差分を生成するツールです。
 
-## インストール
+![alt text](top_image.png)
+
+## インストール手順
 
 1. **リポジトリのクローン**
    ```bash
@@ -25,39 +27,49 @@
 
 本ツールを使用するには、いくつかのモデルを手動でダウンロードして `assets/models/` ディレクトリ（または指定のパス）に配置する必要があります。
 
-### 1. ディレクトリの作成
-```bash
-mkdir -p assets/models
-```
-
-### 2. Pose Generator (Qwen Image Edit)
-*   **モデル**: Qwen-Image-Edit (例: `Qwen/Qwen-Image-Edit-2511`)
-*   **手順**: 
-    1. HuggingFace等からモデル一式をダウンロードしてください。
-    2. `assets/models/qwen_image_edit/` ディレクトリに配置してください。
-    ※ 空の `.gitkeep` がありますが、モデルファイル (`config.json`, `*.safetensors` 等) を同じ場所に置いてください。
-
-### 3. Upscaler (Real-ESRGAN)
-*   **モデル**: RealESRGAN_x4plus_anime_6B
-*   **手順**: 
-    以下のリンクから `RealESRGAN_x4plus_anime_6B.pth` をダウンロードし、`assets/models/` に配置してください。
-    https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth
-
-### 4. Mask Generator (Meta SAM3)
+### 1. Mask Generator (Meta SAM3)
 *   **モデル**: SAM3 (via Ultralytics)
 *   **手順**:
-    アプリ初回起動時に `ultralytics` ライブラリ経由で自動的に必要なモデルがダウンロードされます。
-    もし手動で管理したい場合は、`sam2.pt` (または `sam3.pt`) をダウンロードし、設定ファイルのパスに合わせて配置してください。
+    `sam3.pt`をダウンロードし、`assets/models/`の配下に配置してください。
 
-### 5. Expression Editor (SDXL)
-*   **モデル**: アニメ系SDXLモデル (例: Animagine XL 3.1 など)
+    https://huggingface.co/facebook/sam3
+
+### 2. Expression Editor (SDXL)
+*   **モデル**: アニメ系SDXLモデルを推奨(動作ではリアス系モデルを想定)
 *   **手順**:
     Civitaiなどから好みのSDXL Checkpoint (.safetensors) をダウンロードし、任意の場所に保存してください。
-    `config/settings.yaml` の `expression_editor.checkpoint_path` にその絶対パスまたは相対パスを記述してください。
+    `config/settings.yaml` の `expression_editor.model_directories` に格納したフォルダのパスを記述してください。
+    デフォルトでは `assets/models/sdxl` に格納したフォルダのパスが記述されています。
 
 ## 使い方
-
+0. **起動**
 ```bash
 python app.py
 ```
 ブラウザで `http://127.0.0.1:7860` にアクセスしてください。
+
+1. **キャラクター画像を選択**
+   - ツール画面の「Upload Character Image」から、キャラクターの立ち絵を選択します。
+
+2. **マスクの生成**
+   - 「Generate Mask」ボタンをクリックします。
+   - SAM3モデルが自動的にキャラクターの輪郭を検出し、マスクを生成します。
+   - 生成されたマスクはプレビューで確認できます。
+
+3. **表情の編集**
+   - **モデル選択**: `config/settings.yaml` の `expression_editor.model_directories` で指定したフォルダから使用するモデルを選択します。
+   - **プロンプト入力**: ベースとなるポジティブプロンプトをテキストで入力します。主に顔に関連するプロンプトを記載してください。
+     - 例: `eye`, `pupils`, `mouth`, `nose`, `eyebrows`, `face shape`, etc.
+   - **ネガティブプロンプト**: ベースとなるネガティブプロンプトをテキストで入力します。
+     - 例: `ugly`, `deformed`, `blurry` など
+   - **表情プロンプト**: 生成したい差分表情のプロンプトを入力します。また、保存時のファイル名にも使用されます。
+     - 例: `smile`, `frown`, `angry`, `happy`, `sad`, etc.
+   - **ファイル名プレフィックス**:ファイル名の先頭に付与されます。キャラクター名など管理用の情報を入力してください。
+   - **パラメータ調整 Advanced Parameters**:
+     - **Denoising Strength**: マスクの適用度合いを調整します。値が大きいほど元の画像から離れ、プロンプトの影響が強くなります。
+     - **Guidance Scale**: プロンプトへの忠実度を調整します。
+   - 「Generate Batch」ボタンをクリックすると、表情が編集された画像が生成されます。
+
+4. **結果の確認**
+   - 生成された画像はギャラリーに表示されます。
+   - また、`outputs/images/` に生成された画像が保存されます。
