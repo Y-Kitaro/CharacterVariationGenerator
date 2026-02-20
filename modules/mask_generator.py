@@ -26,7 +26,6 @@ class MaskGenerator:
 
                 print(f"Loading SAM3SemanticPredictor ({target_model_path})...")
                 
-                # Configure Overrides as per user snippet (sam_test.py)
                 overrides = dict(
                     conf=0.25,
                     task="segment",

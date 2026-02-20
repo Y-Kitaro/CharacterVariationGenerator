@@ -235,14 +235,6 @@ class ExpressionEditor:
             
             # Resize back
             output_crop = output_resized.resize(cropped_img.size, Image.LANCZOS)
-            
-            # Feathering composite
-            # Create a soft mask from the cropped mask
-            # We used binary mask for crop, but let's re-crop the original mask for feathering
-            
-            # Apply feather to the mask used for compositing
-            # We can use the resized mask or the original cropped mask
-            # Better to use the original resolution mask for final composite
             mask_for_paste = mask.crop(bbox)
             if feather > 0:
                  mask_for_paste = mask_for_paste.filter(ImageFilter.GaussianBlur(feather))

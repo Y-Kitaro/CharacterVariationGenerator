@@ -71,7 +71,6 @@ def load_selected_model(model_name):
         return f"Error loading model: {e}"
 
 # --- Settings Persistence ---
-# --- Settings Persistence ---
 def load_settings():
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -105,7 +104,7 @@ saved = load_settings()
 DEFAULT_SAM = saved.get("sam_prompt", "face")
 DEFAULT_ADJ = saved.get("mask_adjustment", 0)
 DEFAULT_BASE_POS = saved.get("base_positive_prompt", "high quality, detailed")
-DEFAULT_BASE_NEG = saved.get("base_negative_prompt", "lowres, bad anatomy, bad hands, cropped, worst quality")
+DEFAULT_BASE_NEG = saved.get("base_negative_prompt", "lowres, worst quality")
 DEFAULT_PREFIX = saved.get("file_prefix", "variation_")
 DEFAULT_STRENGTH = saved.get("strength", 0.55)
 DEFAULT_GUIDANCE = saved.get("guidance", 7.5)
