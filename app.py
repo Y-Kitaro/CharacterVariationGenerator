@@ -113,12 +113,12 @@ DEFAULT_STEPS = saved.get("steps", 20)
 
 # Batch Table Defaults
 # Expression Prompt, Filename Suffix
-DEFAULT_BATCH_DATA = [
+DEFAULT_BATCH_DATA = saved.get("batch_data", [
     ["smile", "smile"],
     ["angry", "angry"],
     ["sad", "sad"],
     ["surprised", "surprised"]
-]
+])
 
 # --- Processing Logic ---
 
@@ -250,7 +250,8 @@ def run_batch_generation(
         "file_prefix": prefix,
         "strength": strength,
         "guidance": guidance,
-        "steps": steps
+        "steps": steps,
+        "batch_data": rows
     }
     save_settings(current_settings)
         
