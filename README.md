@@ -56,7 +56,14 @@ python app.py
    - SAM3モデルが自動的にキャラクターの輪郭を検出し、マスクを生成します。
    - 生成されたマスクはプレビューで確認できます。
 
-3. **表情の編集**
+3. **キャラクターの切り抜き**
+   - 「Enable Character Crop After Gen」チェックボックスをオンにすることで、キャラクターの切り抜きを行うことができます。
+   - 「Preview Crop Range」ボタンをクリックすると、切り抜きのプレビューを確認できます。
+   - 「Crop SAM Prompt」で切り抜き用のプロンプトを変更できます。
+   - 「Crop Mask Adj」でマスクの適用度合いを調整できます。
+   - 「Crop SAM Conf」でマスクの信頼度を調整できます。
+
+4. **表情の編集**
    - **モデル選択**: `config/settings.yaml` の `expression_editor.model_directories` で指定したフォルダから使用するモデルを選択します。
    - **プロンプト入力**: ベースとなるポジティブプロンプトをテキストで入力します。主に顔に関連するプロンプトを記載してください。
      - 例: `eye`, `pupils`, `mouth`, `nose`, `eyebrows`, `face shape`, etc.
@@ -70,6 +77,6 @@ python app.py
      - **Guidance Scale**: プロンプトへの忠実度を調整します。
    - 「Generate Batch」ボタンをクリックすると、表情が編集された画像が生成されます。
 
-4. **結果の確認**
+5. **結果の確認**
    - 生成された画像はギャラリーに表示されます。
    - また、`outputs/images/` に生成された画像が保存されます。
