@@ -1,6 +1,7 @@
 import gradio as gr
 from modules.mask_generator import MaskGenerator
 from modules.expression_editor import ExpressionEditor
+from modules.image_cropper import ImageCropper
 from modules.utils import resolve_model_path, list_models
 import os
 import json
@@ -11,6 +12,7 @@ from PIL import Image
 # Initialize Modules
 mask_gen = MaskGenerator()
 expr_editor = ExpressionEditor()
+image_cropper = ImageCropper(mask_gen)
 
 # Settings File Path
 SETTINGS_FILE = "config/last_settings.json"
@@ -103,12 +105,17 @@ def save_settings(settings):
 saved = load_settings()
 DEFAULT_SAM = saved.get("sam_prompt", "face")
 DEFAULT_ADJ = saved.get("mask_adjustment", 0)
+DEFAULT_SAM_CONF = saved.get("sam_conf", 0.25)
 DEFAULT_BASE_POS = saved.get("base_positive_prompt", "high quality, detailed")
 DEFAULT_BASE_NEG = saved.get("base_negative_prompt", "lowres, worst quality")
 DEFAULT_PREFIX = saved.get("file_prefix", "variation_")
 DEFAULT_STRENGTH = saved.get("strength", 0.55)
 DEFAULT_GUIDANCE = saved.get("guidance", 7.5)
 DEFAULT_STEPS = saved.get("steps", 20)
+DEFAULT_CROP_ENABLED = saved.get("crop_enabled", False)
+DEFAULT_CROP_PROMPT = saved.get("crop_prompt", "1girl")
+DEFAULT_CROP_ADJ = saved.get("crop_adj", 0)
+DEFAULT_CROP_CONF = saved.get("crop_conf", 0.25)
 
 # Batch Table Defaults
 # Expression Prompt, Filename Suffix
@@ -126,13 +133,13 @@ current_mask = None
 current_input_image = None
 current_mask_image_display = None
 
-def run_mask_generation(img, sam_prompt, adj):
+def run_mask_generation(img, sam_prompt, adj, conf):
     global current_mask, current_input_image, current_mask_image_display
     if img is None:
         return None
     
-    print(f"Generating mask for '{sam_prompt}' with adj {adj}...")
-    mask = mask_gen.generate_mask(img, prompt_text=sam_prompt, dilation_factor=adj)
+    print(f"Generating mask for '{sam_prompt}' with adj {adj}, conf {conf}...")
+    mask = mask_gen.generate_mask(img, prompt_text=sam_prompt, dilation_factor=adj, conf=conf)
     
     current_input_image = img
     current_mask = mask # PIL Image (L mode)
@@ -149,7 +156,14 @@ def run_batch_generation(
     prefix, 
     strength, 
     guidance, 
-    steps
+    steps,
+    enable_crop,
+    crop_prompt,
+    crop_adj,
+    crop_conf,
+    sam_prompt,
+    mask_adj,
+    sam_conf
 ):
     global current_mask, model_map
     
@@ -180,8 +194,8 @@ def run_batch_generation(
 
     if current_mask is None:
         # Generate default mask if not yet generated manually
-        print("Mask not found, generating default 'face' mask...")
-        current_mask = run_mask_generation(input_img, "face", 0)
+        print("Mask not found, generating mask based on UI settings...")
+        current_mask = run_mask_generation(input_img, sam_prompt, mask_adj, sam_conf)
     
     # Check output directory
     output_dir = "outputs"
@@ -238,18 +252,27 @@ def run_batch_generation(
             filename = f"{prefix}{save_suffix}_{timestamp}.png"
             save_path = os.path.join(output_dir, filename)
             
+        if enable_crop:
+            res_img = image_cropper.crop_image_by_prompt(res_img, crop_prompt, crop_adj, crop_conf)
+            
         res_img.save(save_path)
         results.append((res_img, filename))
         
     # Save Settings
     current_settings = {
-        "sam_prompt": DEFAULT_SAM, 
+        "sam_prompt": sam_prompt, 
+        "mask_adjustment": mask_adj,
+        "sam_conf": sam_conf,
         "base_positive_prompt": base_pos,
         "base_negative_prompt": base_neg,
         "file_prefix": prefix,
         "strength": strength,
         "guidance": guidance,
         "steps": steps,
+        "crop_enabled": enable_crop,
+        "crop_prompt": crop_prompt,
+        "crop_adj": crop_adj,
+        "crop_conf": crop_conf,
         "batch_data": rows
     }
     save_settings(current_settings)
@@ -274,9 +297,20 @@ with gr.Blocks(title="Character Variation Generator v2", theme=gr.themes.Soft())
             with gr.Row():
                 sam_prompt_box = gr.Textbox(label="Segmentation Prompt", value=DEFAULT_SAM, scale=2)
                 mask_adj_slider = gr.Slider(minimum=-20, maximum=20, value=DEFAULT_ADJ, step=1, label="Mask Adj", scale=2)
+                sam_conf_slider = gr.Slider(minimum=0.01, maximum=1.0, value=DEFAULT_SAM_CONF, step=0.01, label="SAM Conf", scale=2)
                 gen_mask_btn = gr.Button("Generate Mask", variant="secondary", scale=1)
             
             mask_display = gr.Image(label="Current Mask", type="pil", interactive=False, height=200)
+
+            gr.Markdown("### Character Cropping Option")
+            with gr.Row():
+                enable_crop_chk = gr.Checkbox(label="Enable Character Crop After Gen", value=DEFAULT_CROP_ENABLED)
+                crop_prompt_box = gr.Textbox(label="Crop SAM Prompt", value=DEFAULT_CROP_PROMPT)
+            with gr.Row():
+                crop_adj_slider = gr.Slider(minimum=-20, maximum=20, value=DEFAULT_CROP_ADJ, step=1, label="Crop Mask Adj", scale=2)
+                crop_conf_slider = gr.Slider(minimum=0.01, maximum=1.0, value=DEFAULT_CROP_CONF, step=0.01, label="Crop SAM Conf", scale=2)
+            preview_crop_btn = gr.Button("Preview Crop Range", variant="secondary")
+            crop_display = gr.Image(label="Crop Preview", type="pil", interactive=False, height=200)
 
         # MIDDLE COLUMN: Settings & Batch
         with gr.Column(scale=1):
@@ -313,7 +347,7 @@ with gr.Blocks(title="Character Variation Generator v2", theme=gr.themes.Soft())
             with gr.Accordion("Advanced Parameters", open=False):
                 strength_slider = gr.Slider(minimum=0.0, maximum=1.0, value=DEFAULT_STRENGTH, label="Denoising Strength")
                 guidance_slider = gr.Slider(minimum=1.0, maximum=20.0, value=DEFAULT_GUIDANCE, label="Guidance Scale")
-                steps_slider = gr.Slider(minimum=1, maximum=100, value=DEFAULT_STEPS, label="Steps")
+                steps_slider = gr.Slider(minimum=1, maximum=100, value=DEFAULT_STEPS, step=1, label="Steps")
 
             generate_btn = gr.Button("Generate Batch", variant="primary", size="lg")
 
@@ -335,7 +369,7 @@ with gr.Blocks(title="Character Variation Generator v2", theme=gr.themes.Soft())
     # Mask Generation
     gen_mask_btn.click(
         fn=run_mask_generation,
-        inputs=[input_image_box, sam_prompt_box, mask_adj_slider],
+        inputs=[input_image_box, sam_prompt_box, mask_adj_slider, sam_conf_slider],
         outputs=[mask_display]
     )
     
@@ -351,9 +385,23 @@ with gr.Blocks(title="Character Variation Generator v2", theme=gr.themes.Soft())
             prefix_box,
             strength_slider,
             guidance_slider,
-            steps_slider
+            steps_slider,
+            enable_crop_chk,
+            crop_prompt_box,
+            crop_adj_slider,
+            crop_conf_slider,
+            sam_prompt_box,
+            mask_adj_slider,
+            sam_conf_slider
         ],
         outputs=[gallery, status_text]
+    )
+
+    # Preview Crop
+    preview_crop_btn.click(
+        fn=image_cropper.preview_crop_mask,
+        inputs=[input_image_box, crop_prompt_box, crop_adj_slider, crop_conf_slider],
+        outputs=[crop_display]
     )
 
 if __name__ == "__main__":

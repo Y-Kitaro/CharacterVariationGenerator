@@ -16,7 +16,6 @@ class MaskGenerator:
         self.model_name = self.config["models"]["mask_generator"].get("segmentation_model_path", "sam3.pt")
         self.device = self.config["device"]
         self.model = None
-
     def load_model(self):
         if self.model is None:
             try:
@@ -48,8 +47,11 @@ class MaskGenerator:
             self.model = None
         torch.cuda.empty_cache()
 
-    def generate_mask(self, image: Image.Image, prompt_text: str = "face", dilation_factor=0) -> Image.Image:
+    def generate_mask(self, image: Image.Image, prompt_text: str = "face", dilation_factor=0, conf=0.25) -> Image.Image:
         self.load_model()
+        
+        if self.model is not None and getattr(self.model, "args", None) is not None:
+            self.model.args.conf = conf
         
         w, h = image.size
         # Create blank mask
@@ -67,7 +69,7 @@ class MaskGenerator:
             image_np = np.array(image)
             image_cv = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
 
-            print(f"Predicting mask using SAM3SemanticPredictor (Text: '{prompt_text}')...")
+            print(f"Predicting mask using SAM3SemanticPredictor (Text: '{prompt_text}', conf: {conf})...")
             
             # Predict
             self.model.set_image(image_cv) 
